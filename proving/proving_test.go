@@ -1,6 +1,7 @@
 package proving
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spacemeshos/sha256-simd"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/spacemeshos/post/config"
 	"github.com/spacemeshos/post/initialization"
@@ -130,7 +132,7 @@ func BenchmarkProver_GenerateProof(t *testing.B) {
 	opts := config.DefaultInitOpts()
 	opts.ComputeProviderID = int(CPUProviderID())
 	opts.NumUnits = numUnits
-	opts.DataDir = "./16MB"
+	opts.DataDir = "./test-data/16MB"
 	opts.MaxFileSize = 4294967296
 
 	init, err := NewInitializer(
@@ -267,5 +269,53 @@ func TestCalcProvingDifficulty(t *testing.T) {
 		}
 
 		t.Log("\n")
+	}
+}
+
+type noopReporter struct{}
+
+func (r *noopReporter) Report(context.Context, uint64) {}
+
+func benchmarkHashing(b *testing.B, size int, labelSizeBits int) {
+	labelSize := labelSizeBits / 8
+
+	challenge := make([]byte, 32, 32)
+	difficulty := shared.ProvingDifficulty(uint64(size/labelSize), uint64(2000))
+
+	var buf = make([]byte, size)
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reader := bytes.NewBuffer(buf)
+		workerQeues := []chan batch{make(chan batch, 1)}
+
+		var producer errgroup.Group
+		producer.Go(func() error {
+			return produce(context.Background(), reader, workerQeues)
+		})
+		work(context.Background(), workerQeues[0], &noopReporter{}, uint8(labelSize), challenge, 0, difficulty)
+		producer.Wait()
+	}
+}
+
+func BenchmarkHashingLabels(b *testing.B) {
+	tests := []struct {
+		name      string
+		f         func(*testing.B, int, int)
+		size      int
+		labelSize int
+	}{
+		{"label:8b", benchmarkHashing, 16 * 1024 * 1024, 8},
+		{"label:16b", benchmarkHashing, 16 * 1024 * 1024, 16},
+		{"label:32b", benchmarkHashing, 16 * 1024 * 1024, 32},
+		{"label:64b", benchmarkHashing, 16 * 1024 * 1024, 64},
+		{"label:128b", benchmarkHashing, 16 * 1024 * 1024, 128},
+		{"label:256b", benchmarkHashing, 16 * 1024 * 1024, 256},
+		{"label:512b", benchmarkHashing, 16 * 1024 * 1024, 512},
+		{"label:1024b", benchmarkHashing, 16 * 1024 * 1024, 1024},
+	}
+
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) { test.f(b, test.size, test.labelSize) })
 	}
 }

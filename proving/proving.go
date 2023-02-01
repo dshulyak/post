@@ -249,8 +249,9 @@ type nonceResult struct {
 }
 
 type batch struct {
-	data  []byte
-	index uint64
+	data    []byte
+	index   uint64
+	release func()
 }
 
 func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge Challenge, start, end uint32) (*nonceResult, error) {
@@ -258,12 +259,6 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 
 	nonceWorkers := NumWorkersPerNonce
 	workers := end - start + 1
-
-	var bufferPool = sync.Pool{
-		New: func() any {
-			return make([]byte, 1024*1024)
-		},
-	}
 
 	var workerQeues []chan batch
 	for i := 0; i < int(workers); i++ {
@@ -274,39 +269,12 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 	defer cancel()
 
 	eg.Go(func() error {
-		defer func() {
-			for i := 0; i < int(workers); i++ {
-				close(workerQeues[i])
-			}
-		}()
 		reader, err := persistence.NewLabelsReader(p.datadir, uint(p.cfg.BitsPerLabel))
 		if err != nil {
 			return err
 		}
 		defer reader.Close()
-
-		index := uint64(0)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			buffer := bufferPool.Get().([]byte)
-			n, err := reader.Read(buffer)
-			if err != nil {
-				return nil
-			}
-			for i := 0; i < int(workers); i++ {
-				workerQeues[i] <- batch{
-					data:  buffer,
-					index: index,
-				}
-			}
-			index += uint64(n)
-		}
+		return produce(ctx, reader, workerQeues)
 	})
 
 	results := make(chan *nonceResult, end-start+1)
@@ -314,7 +282,7 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 		queue := workerQeues[i]
 		nonce := i + start
 		eg.Go(func() error {
-			res, err := p.trySingleNonce(ctx, numLabels, challenge, nonce, queue, nonceWorkers, &bufferPool)
+			res, err := p.trySingleNonce(ctx, numLabels, challenge, nonce, queue, nonceWorkers)
 			if err != nil {
 				p.logger.Info("failed to try nonce %d: %v", nonce, err)
 			} else if res != nil {
@@ -334,43 +302,108 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 	return nil, ctx.Err()
 }
 
-func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge Challenge, nonce uint32, data chan batch, workers int, bufferPool *sync.Pool) (*nonceResult, error) {
+func produce(ctx context.Context, reader io.Reader, workerQeues []chan batch) error {
+	var bufferPool = sync.Pool{
+		New: func() any {
+			return make([]byte, 1024*1024)
+		},
+	}
+	defer func() {
+		for _, q := range workerQeues {
+			close(q)
+		}
+	}()
+	index := uint64(0)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		buffer := bufferPool.Get().([]byte)
+		n, err := reader.Read(buffer)
+		if err != nil {
+			return nil
+		}
+		for i := 0; i < len(workerQeues); i++ {
+			workerQeues[i] <- batch{
+				data:    buffer,
+				index:   index,
+				release: func() { bufferPool.Put(buffer) },
+			}
+		}
+		index += uint64(n)
+	}
+}
+
+type IndexReporter interface {
+	Report(context.Context, uint64)
+}
+
+type IndexConsumer struct {
+	Indexes chan uint64
+}
+
+func (c *IndexConsumer) Report(ctx context.Context, index uint64) {
+	select {
+	case c.Indexes <- index:
+	case <-ctx.Done():
+	}
+}
+
+func work(ctx context.Context, data <-chan batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) (tried uint64) {
+	hasher := sha256.New().(*sha256.Digest)
+	hasher.Write(ch)
+	var nb [4]byte
+	binary.LittleEndian.PutUint32(nb[:], nonce)
+	hasher.Write(nb[:])
+	var hb [32]byte
+	for batch := range data {
+		index := batch.index
+		labels := batch.data
+		for {
+			if len(labels) == 0 {
+				break
+			}
+			tried += 1
+			label := labels[:labelSize]
+			labels = labels[labelSize:]
+
+			s := *hasher
+			s.Write(label)
+			s.CheckSumInto(&hb)
+			// hasher.Sum(hb[:0])
+
+			value := uint64(hb[0]) | uint64(hb[1])<<8 | uint64(hb[2])<<16 | uint64(hb[3])<<24 |
+				uint64(hb[4])<<32 | uint64(hb[5])<<40 | uint64(hb[6])<<48 | uint64(hb[7])<<56
+
+			if value <= difficulty {
+				reporter.Report(ctx, index)
+			}
+			index++
+		}
+		batch.release()
+	}
+	return tried
+}
+
+func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge Challenge, nonce uint32, data chan batch, workers int) (*nonceResult, error) {
 	p.logger.Info("Trying nonce %d", nonce)
 	difficulty := shared.ProvingDifficulty(numLabels, uint64(p.cfg.K1))
 
 	var eg errgroup.Group
 
-	indexes := make(chan uint64, workers)
-
-	hasher := sha256.New().(*sha256.Digest)
-	hasher.Write(challenge)
-	var nb [4]byte
-	binary.LittleEndian.PutUint32(nb[:], nonce)
-	hasher.Write(nb[:])
+	indexConsumer := &IndexConsumer{
+		Indexes: make(chan uint64, workers*10),
+	}
 
 	var tried atomic.Uint64
 	for workerId := 0; workerId < workers; workerId++ {
 		eg.Go(func() error {
-			var hb [32]byte
-			for batch := range data {
-				for i, label := range batch.data {
-					s := *hasher
-					s.Write([]byte{label})
-					s.CheckSumInto(&hb)
-					// hasher.Write([]byte{label})
-					// hasher.Sum(hb[:0])
-
-					value := uint64(hb[0]) | uint64(hb[1])<<8 | uint64(hb[2])<<16 | uint64(hb[3])<<24 |
-						uint64(hb[4])<<32 | uint64(hb[5])<<40 | uint64(hb[6])<<48 | uint64(hb[7])<<56
-
-					if value <= difficulty {
-						indexes <- uint64(i) + batch.index
-					}
-
-				}
-				tried.Add(uint64(len(batch.data)))
-				bufferPool.Put(batch.data)
-			}
+			t := work(ctx, data, indexConsumer, p.cfg.BitsPerLabel/8, challenge, nonce, difficulty)
+			tried.Add(t)
 			return nil
 		})
 	}
@@ -387,10 +420,10 @@ func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge
 		select {
 		case <-done:
 			return nil, fmt.Errorf("exhausted all labels; tried: %v, passed: %v, needed: %v", tried.Load(), len(passed), p.cfg.K2)
-		case index := <-indexes:
-			// p.logger.Info("[%d] passed index: %d", nonce, index)
+		case index := <-indexConsumer.Indexes:
 			passed = append(passed, index)
 			if len(passed) >= int(p.cfg.K2) {
+				p.logger.Info("Found enough label indexes; tried: %v, passed: %v, needed: %v", tried.Load(), len(passed), p.cfg.K2)
 				sort.Slice(passed, func(i, j int) bool {
 					return i < j
 				})
