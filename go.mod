@@ -4,9 +4,9 @@ go 1.19
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/minio/sha256-simd v1.0.0
 	github.com/spacemeshos/bitstream v0.1.0
 	github.com/spacemeshos/ed25519 v0.1.1
+	github.com/spacemeshos/sha256-simd v0.1.0
 	github.com/stretchr/testify v1.8.1
 	golang.org/x/sync v0.1.0
 )

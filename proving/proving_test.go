@@ -7,7 +7,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/minio/sha256-simd"
+	"github.com/spacemeshos/sha256-simd"
 	"github.com/stretchr/testify/require"
 
 	"github.com/spacemeshos/post/config"
@@ -36,70 +36,128 @@ func getTestConfig(t *testing.T) (config.Config, config.InitOpts) {
 type testLogger struct {
 	shared.Logger
 
-	t *testing.T
+	t testing.TB
 }
 
 func (l testLogger) Info(msg string, args ...any)  { l.t.Logf("\tINFO\t"+msg, args...) }
 func (l testLogger) Debug(msg string, args ...any) { l.t.Logf("\tDEBUG\t"+msg, args...) }
+func (l testLogger) Error(msg string, args ...any) { l.t.Logf("\tERROR\t"+msg, args...) }
 
 func TestProver_GenerateProof(t *testing.T) {
 	// TODO(moshababo): tests should range through `cfg.BitsPerLabel` as well.
 	r := require.New(t)
 	log := testLogger{t: t}
 
-	for numUnits := uint32(config.DefaultMinNumUnits); numUnits < 6; numUnits++ {
-		t.Run(fmt.Sprintf("numUnits=%d", numUnits), func(t *testing.T) {
-			t.Parallel()
+	// for numUnits := uint32(config.DefaultMinNumUnits); numUnits < 6; numUnits++ {
+	// numUnits := uint32(5242880)
+	numUnits := uint32(2000)
+	t.Run(fmt.Sprintf("numUnits=%d", numUnits), func(t *testing.T) {
+		t.Parallel()
 
-			nodeId := make([]byte, 32)
-			commitmentAtxId := make([]byte, 32)
-			ch := make(Challenge, 32)
-			cfg := config.DefaultConfig()
-			cfg.LabelsPerUnit = 1 << 12
+		nodeId := make([]byte, 32)
+		commitmentAtxId := make([]byte, 32)
+		ch := make(Challenge, 32)
+		cfg := config.DefaultConfig()
+		cfg.LabelsPerUnit = 1 << 12
+		cfg.MaxNumUnits = 5242880
 
-			opts := config.DefaultInitOpts()
-			opts.ComputeProviderID = int(CPUProviderID())
-			opts.NumUnits = numUnits
-			opts.DataDir = t.TempDir()
+		opts := config.DefaultInitOpts()
+		opts.ComputeProviderID = int(CPUProviderID())
+		opts.NumUnits = numUnits
+		// opts.DataDir = t.TempDir()
+		opts.DataDir = "/home/bartosz/workspace/post/8MB"
+		// opts.DataDir = "/home/bartosz/workspace/post/20GB"
+		opts.MaxFileSize = 4294967296
+		// opts.MaxFileSize = 21474836480
 
-			init, err := NewInitializer(
-				initialization.WithNodeId(nodeId),
-				initialization.WithCommitmentAtxId(commitmentAtxId),
-				initialization.WithConfig(cfg),
-				initialization.WithInitOpts(opts),
-				initialization.WithLogger(log),
-			)
-			r.NoError(err)
-			r.NoError(init.Initialize(context.Background()))
+		init, err := NewInitializer(
+			initialization.WithNodeId(nodeId),
+			initialization.WithCommitmentAtxId(commitmentAtxId),
+			initialization.WithConfig(cfg),
+			initialization.WithInitOpts(opts),
+			initialization.WithLogger(log),
+		)
+		r.NoError(err)
+		r.NoError(init.Initialize(context.Background()))
 
-			p, err := NewProver(cfg, opts.DataDir, nodeId, commitmentAtxId)
-			r.NoError(err)
-			p.SetLogger(log)
+		p, err := NewProver(cfg, opts.DataDir, nodeId, commitmentAtxId)
+		r.NoError(err)
+		p.SetLogger(log)
 
-			binary.BigEndian.PutUint64(ch, uint64(opts.NumUnits))
-			proof, proofMetaData, err := p.GenerateProof(ch)
-			r.NoError(err, "numUnits: %d", opts.NumUnits)
-			r.NotNil(proof)
-			r.NotNil(proofMetaData)
+		binary.BigEndian.PutUint64(ch, uint64(opts.NumUnits))
+		ch[7] = 128 // 96s
 
-			r.Equal(nodeId, proofMetaData.NodeId)
-			r.Equal(commitmentAtxId, proofMetaData.CommitmentAtxId)
-			r.Equal(ch, proofMetaData.Challenge)
-			r.Equal(cfg.BitsPerLabel, proofMetaData.BitsPerLabel)
-			r.Equal(cfg.LabelsPerUnit, proofMetaData.LabelsPerUnit)
-			r.Equal(opts.NumUnits, proofMetaData.NumUnits)
-			r.Equal(cfg.K1, proofMetaData.K1)
-			r.Equal(cfg.K2, proofMetaData.K2)
+		// started := time.Now()
+		proof, proofMetaData, err := p.GenerateProof(ch)
+		// log.Info("Took: %s\n", time.Since(started))
+		r.NoError(err, "numUnizts: %d", opts.NumUnits)
+		r.NotNil(proof)
+		r.NotNil(proofMetaData)
 
-			numLabels := cfg.LabelsPerUnit * uint64(numUnits)
-			indexBitSize := uint(shared.BinaryRepresentationMinBits(numLabels))
-			r.Equal(shared.Size(indexBitSize, uint(p.cfg.K2)), uint(len(proof.Indices)))
+		r.Equal(nodeId, proofMetaData.NodeId)
+		r.Equal(commitmentAtxId, proofMetaData.CommitmentAtxId)
+		r.Equal(ch, proofMetaData.Challenge)
+		r.Equal(cfg.BitsPerLabel, proofMetaData.BitsPerLabel)
+		r.Equal(cfg.LabelsPerUnit, proofMetaData.LabelsPerUnit)
+		r.Equal(opts.NumUnits, proofMetaData.NumUnits)
+		r.Equal(cfg.K1, proofMetaData.K1)
+		r.Equal(cfg.K2, proofMetaData.K2)
 
-			log.Info("numLabels: %v, indices size: %v\n", numLabels, len(proof.Indices))
+		numLabels := cfg.LabelsPerUnit * uint64(numUnits)
+		indexBitSize := uint(shared.BinaryRepresentationMinBits(numLabels))
+		r.Equal(shared.Size(indexBitSize, uint(p.cfg.K2)), uint(len(proof.Indices)))
 
-			r.NoError(verifying.Verify(proof, proofMetaData))
-		})
-	}
+		log.Info("numLabels: %v, indices size: %v\n", numLabels, len(proof.Indices))
+
+		r.NoError(verifying.Verify(proof, proofMetaData))
+	})
+	// }
+}
+
+func BenchmarkProver_GenerateProof(t *testing.B) {
+	r := require.New(t)
+	log := testLogger{t: t}
+
+	numUnits := uint32(4000)
+
+	nodeId := make([]byte, 32)
+	commitmentAtxId := make([]byte, 32)
+	ch := make(Challenge, 32)
+	cfg := config.DefaultConfig()
+	cfg.LabelsPerUnit = 1 << 12
+	cfg.MaxNumUnits = 5242880
+
+	opts := config.DefaultInitOpts()
+	opts.ComputeProviderID = int(CPUProviderID())
+	opts.NumUnits = numUnits
+	opts.DataDir = "./16MB"
+	opts.MaxFileSize = 4294967296
+
+	init, err := NewInitializer(
+		initialization.WithNodeId(nodeId),
+		initialization.WithCommitmentAtxId(commitmentAtxId),
+		initialization.WithConfig(cfg),
+		initialization.WithInitOpts(opts),
+		initialization.WithLogger(log),
+	)
+	r.NoError(err)
+	r.NoError(init.Initialize(context.Background()))
+
+	p, err := NewProver(cfg, opts.DataDir, nodeId, commitmentAtxId)
+	r.NoError(err)
+	p.SetLogger(log)
+
+	binary.BigEndian.PutUint64(ch, uint64(opts.NumUnits))
+
+	proof, proofMetaData, err := p.GenerateProof(ch)
+
+	numLabels := cfg.LabelsPerUnit * uint64(numUnits)
+	indexBitSize := uint(shared.BinaryRepresentationMinBits(numLabels))
+	r.Equal(shared.Size(indexBitSize, uint(p.cfg.K2)), uint(len(proof.Indices)))
+
+	log.Info("numLabels: %v, indices size: %v\n", numLabels, len(proof.Indices))
+
+	r.NoError(verifying.Verify(proof, proofMetaData))
 }
 
 func TestProver_GenerateProof_NotAllowed(t *testing.T) {

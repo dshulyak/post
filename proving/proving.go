@@ -3,10 +3,16 @@ package proving
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
+	"sync/atomic"
+
+	"github.com/spacemeshos/sha256-simd"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/spacemeshos/post/config"
 	"github.com/spacemeshos/post/initialization"
@@ -16,8 +22,9 @@ import (
 )
 
 const (
-	NumNoncesPerIteration = 10 // TODO(moshababo): update the recommended value
-	MaxNumIterations      = 10 // TODO(moshababo): update the recommended value
+	NumWorkersPerNonce    = 4
+	NumNoncesPerIteration = 5   // TODO(moshababo): update the recommended value
+	MaxNumIterations      = 100 // TODO(moshababo): update the recommended value
 )
 
 type (
@@ -82,13 +89,14 @@ func (p *Prover) GenerateProof(challenge Challenge) (*Proof, *ProofMetadata, err
 
 		p.logger.Debug("proving: starting iteration %d; startNonce: %v, endNonce: %v, challenge: %x", i+1, startNonce, endNonce, challenge)
 
-		solutionNonceResult, err := p.tryNonces(numLabels, challenge, startNonce, endNonce)
+		solutionNonceResult, err := p.tryManyNonces(context.Background(), numLabels, challenge, startNonce, endNonce)
+		// solutionNonceResult, err := p.tryNonces(numLabels, challenge, startNonce, endNonce)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		if solutionNonceResult != nil {
-			p.logger.Info("proving: generated proof after %d iteration(s)", i+1)
+			p.logger.Info("proving: generated proof after %d iteration(s). nonce: %d", i+1, solutionNonceResult.nonce)
 
 			proof := &Proof{
 				Nonce:   solutionNonceResult.nonce,
@@ -238,6 +246,171 @@ type nonceResult struct {
 	nonce   uint32
 	indices []byte
 	err     error
+}
+
+type batch struct {
+	data  []byte
+	index uint64
+}
+
+func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge Challenge, start, end uint32) (*nonceResult, error) {
+	var eg errgroup.Group
+
+	nonceWorkers := NumWorkersPerNonce
+	workers := end - start + 1
+
+	var bufferPool = sync.Pool{
+		New: func() any {
+			return make([]byte, 1024*1024)
+		},
+	}
+
+	var workerQeues []chan batch
+	for i := 0; i < int(workers); i++ {
+		workerQeues = append(workerQeues, make(chan batch, nonceWorkers*1))
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	eg.Go(func() error {
+		defer func() {
+			for i := 0; i < int(workers); i++ {
+				close(workerQeues[i])
+			}
+		}()
+		reader, err := persistence.NewLabelsReader(p.datadir, uint(p.cfg.BitsPerLabel))
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+
+		index := uint64(0)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			buffer := bufferPool.Get().([]byte)
+			n, err := reader.Read(buffer)
+			if err != nil {
+				return nil
+			}
+			for i := 0; i < int(workers); i++ {
+				workerQeues[i] <- batch{
+					data:  buffer,
+					index: index,
+				}
+			}
+			index += uint64(n)
+		}
+	})
+
+	results := make(chan *nonceResult, end-start+1)
+	for i := uint32(0); i < workers; i++ {
+		queue := workerQeues[i]
+		nonce := i + start
+		eg.Go(func() error {
+			res, err := p.trySingleNonce(ctx, numLabels, challenge, nonce, queue, nonceWorkers, &bufferPool)
+			if err != nil {
+				p.logger.Info("failed to try nonce %d: %v", nonce, err)
+			} else if res != nil {
+				p.logger.Info("Generated proof with nonce %d", nonce)
+				cancel() // we have a proof - stop other workers
+				results <- res
+			}
+			return nil
+		})
+	}
+
+	eg.Wait()
+	close(results)
+	for res := range results {
+		return res, nil
+	}
+	return nil, ctx.Err()
+}
+
+func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge Challenge, nonce uint32, data chan batch, workers int, bufferPool *sync.Pool) (*nonceResult, error) {
+	p.logger.Info("Trying nonce %d", nonce)
+	difficulty := shared.ProvingDifficulty(numLabels, uint64(p.cfg.K1))
+
+	var eg errgroup.Group
+
+	indexes := make(chan uint64, workers)
+
+	hasher := sha256.New().(*sha256.Digest)
+	hasher.Write(challenge)
+	var nb [4]byte
+	binary.LittleEndian.PutUint32(nb[:], nonce)
+	hasher.Write(nb[:])
+
+	var tried atomic.Uint64
+	for workerId := 0; workerId < workers; workerId++ {
+		eg.Go(func() error {
+			var hb [32]byte
+			for batch := range data {
+				for i, label := range batch.data {
+					s := *hasher
+					s.Write([]byte{label})
+					s.CheckSumInto(&hb)
+					// hasher.Write([]byte{label})
+					// hasher.Sum(hb[:0])
+
+					value := uint64(hb[0]) | uint64(hb[1])<<8 | uint64(hb[2])<<16 | uint64(hb[3])<<24 |
+						uint64(hb[4])<<32 | uint64(hb[5])<<40 | uint64(hb[6])<<48 | uint64(hb[7])<<56
+
+					if value <= difficulty {
+						indexes <- uint64(i) + batch.index
+					}
+
+				}
+				tried.Add(uint64(len(batch.data)))
+				bufferPool.Put(batch.data)
+			}
+			return nil
+		})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		eg.Wait()
+		close(done)
+	}()
+
+	var passed []uint64
+
+	for {
+		select {
+		case <-done:
+			return nil, fmt.Errorf("exhausted all labels; tried: %v, passed: %v, needed: %v", tried.Load(), len(passed), p.cfg.K2)
+		case index := <-indexes:
+			// p.logger.Info("[%d] passed index: %d", nonce, index)
+			passed = append(passed, index)
+			if len(passed) >= int(p.cfg.K2) {
+				sort.Slice(passed, func(i, j int) bool {
+					return i < j
+				})
+
+				bitsPerIndex := uint(shared.BinaryRepresentationMinBits(numLabels))
+				buf := bytes.NewBuffer(make([]byte, shared.Size(bitsPerIndex, uint(p.cfg.K2)))[0:0])
+				gsWriter := shared.NewGranSpecificWriter(buf, bitsPerIndex)
+				for _, p := range passed {
+					if err := gsWriter.WriteUintBE(p); err != nil {
+						return nil, err
+					}
+				}
+
+				if err := gsWriter.Flush(); err != nil {
+					return nil, err
+				}
+				return &nonceResult{nonce, buf.Bytes(), nil}, nil
+			}
+		}
+	}
 }
 
 func (p *Prover) tryNonces(numLabels uint64, challenge Challenge, startNonce, endNonce uint32) (*nonceResult, error) {
