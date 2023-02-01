@@ -65,8 +65,8 @@ func TestProver_GenerateProof(t *testing.T) {
 		opts.ComputeProviderID = int(CPUProviderID())
 		opts.NumUnits = numUnits
 		// opts.DataDir = t.TempDir()
-		opts.DataDir = "/home/bartosz/workspace/post/8MB"
-		// opts.DataDir = "/home/bartosz/workspace/post/20GB"
+		opts.DataDir = "./test-data/8MB"
+		// opts.DataDir = "./test-data/20GB"
 		opts.MaxFileSize = 4294967296
 		// opts.MaxFileSize = 21474836480
 

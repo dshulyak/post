@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	input      = "/home/bartosz/workspace/post/8MB"
+	input      = "./test-data/8MB"
 	cpuProfile = "cpu.prof"
 	memProfile = "mem.prof"
 )
