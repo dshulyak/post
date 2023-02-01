@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	NumWorkersPerNonce    = 4
-	NumNoncesPerIteration = 5   // TODO(moshababo): update the recommended value
+	NumWorkersPerNonce    = 1
+	NumNoncesPerIteration = 1   // TODO(moshababo): update the recommended value
 	MaxNumIterations      = 100 // TODO(moshababo): update the recommended value
 )
 
@@ -284,6 +284,7 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 		eg.Go(func() error {
 			res, err := p.trySingleNonce(ctx, numLabels, challenge, nonce, queue, nonceWorkers)
 			if err != nil {
+				cancel()
 				p.logger.Info("failed to try nonce %d: %v", nonce, err)
 			} else if res != nil {
 				p.logger.Info("Generated proof with nonce %d", nonce)
@@ -299,7 +300,7 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 	for res := range results {
 		return res, nil
 	}
-	return nil, ctx.Err()
+	return nil, nil
 }
 
 func produce(ctx context.Context, reader io.Reader, workerQeues []chan batch) error {
@@ -328,10 +329,14 @@ func produce(ctx context.Context, reader io.Reader, workerQeues []chan batch) er
 			return nil
 		}
 		for i := 0; i < len(workerQeues); i++ {
-			workerQeues[i] <- batch{
+			select {
+			case workerQeues[i] <- batch{
 				data:    buffer,
 				index:   index,
 				release: func() { bufferPool.Put(buffer) },
+			}:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 		index += uint64(n)
@@ -359,7 +364,34 @@ func work(ctx context.Context, data <-chan batch, reporter IndexReporter, labelS
 	var nb [4]byte
 	binary.LittleEndian.PutUint32(nb[:], nonce)
 	hasher.Write(nb[:])
-	var hb [32]byte
+	var hb [sha256.Size]byte
+
+	values := map[string]uint64{}
+
+	// maxLabel := uint32(math.Pow(2.0, float64(labelSize*8)))
+	for label := byte(0); ; label++ {
+		labelb := make([]byte, 1)
+		labelb[0] = label
+		s := *hasher
+		s.Write(labelb)
+		s.CheckSumInto(&hb)
+		// hasher.Sum(hb[:0])
+
+		value := uint64(hb[0]) | uint64(hb[1])<<8 | uint64(hb[2])<<16 | uint64(hb[3])<<24 |
+			uint64(hb[4])<<32 | uint64(hb[5])<<40 | uint64(hb[6])<<48 | uint64(hb[7])<<56
+
+		if value <= difficulty {
+			values[string(labelb)] = value
+		}
+
+		if label == 255 {
+			break
+		}
+	}
+	if len(values) == 0 {
+		return 0
+	}
+
 	for batch := range data {
 		index := batch.index
 		labels := batch.data
@@ -371,15 +403,7 @@ func work(ctx context.Context, data <-chan batch, reporter IndexReporter, labelS
 			label := labels[:labelSize]
 			labels = labels[labelSize:]
 
-			s := *hasher
-			s.Write(label)
-			s.CheckSumInto(&hb)
-			// hasher.Sum(hb[:0])
-
-			value := uint64(hb[0]) | uint64(hb[1])<<8 | uint64(hb[2])<<16 | uint64(hb[3])<<24 |
-				uint64(hb[4])<<32 | uint64(hb[5])<<40 | uint64(hb[6])<<48 | uint64(hb[7])<<56
-
-			if value <= difficulty {
+			if val, ok := values[string(label)]; ok && val <= difficulty {
 				reporter.Report(ctx, index)
 			}
 			index++
