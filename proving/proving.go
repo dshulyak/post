@@ -3,15 +3,12 @@ package proving
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"sync"
-	"sync/atomic"
 
-	"github.com/spacemeshos/sha256-simd"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/spacemeshos/post/config"
@@ -248,21 +245,15 @@ type nonceResult struct {
 	err     error
 }
 
-type batch struct {
-	data    []byte
-	index   uint64
-	release func()
-}
-
 func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge Challenge, start, end uint32) (*nonceResult, error) {
 	var eg errgroup.Group
 
 	nonceWorkers := NumWorkersPerNonce
 	workers := end - start + 1
 
-	var workerQeues []chan batch
+	var workerQeues []chan *batch
 	for i := 0; i < int(workers); i++ {
-		workerQeues = append(workerQeues, make(chan batch, nonceWorkers*1))
+		workerQeues = append(workerQeues, make(chan *batch, nonceWorkers*1))
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -303,117 +294,7 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 	return nil, nil
 }
 
-func produce(ctx context.Context, reader io.Reader, workerQeues []chan batch) error {
-	var bufferPool = sync.Pool{
-		New: func() any {
-			return make([]byte, 1024*1024)
-		},
-	}
-	defer func() {
-		for _, q := range workerQeues {
-			close(q)
-		}
-	}()
-	index := uint64(0)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		buffer := bufferPool.Get().([]byte)
-		n, err := reader.Read(buffer)
-		if err != nil {
-			return nil
-		}
-		for i := 0; i < len(workerQeues); i++ {
-			select {
-			case workerQeues[i] <- batch{
-				data:    buffer,
-				index:   index,
-				release: func() { bufferPool.Put(buffer) },
-			}:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		index += uint64(n)
-	}
-}
-
-type IndexReporter interface {
-	Report(context.Context, uint64)
-}
-
-type IndexConsumer struct {
-	Indexes chan uint64
-}
-
-func (c *IndexConsumer) Report(ctx context.Context, index uint64) {
-	select {
-	case c.Indexes <- index:
-	case <-ctx.Done():
-	}
-}
-
-func work(ctx context.Context, data <-chan batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) (tried uint64) {
-	hasher := sha256.New().(*sha256.Digest)
-	hasher.Write(ch)
-	var nb [4]byte
-	binary.LittleEndian.PutUint32(nb[:], nonce)
-	hasher.Write(nb[:])
-	var hb [sha256.Size]byte
-
-	values := map[string]uint64{}
-
-	// maxLabel := uint32(math.Pow(2.0, float64(labelSize*8)))
-	for label := byte(0); ; label++ {
-		labelb := make([]byte, 1)
-		labelb[0] = label
-		s := *hasher
-		s.Write(labelb)
-		s.CheckSumInto(&hb)
-		// hasher.Sum(hb[:0])
-
-		value := uint64(hb[0]) | uint64(hb[1])<<8 | uint64(hb[2])<<16 | uint64(hb[3])<<24 |
-			uint64(hb[4])<<32 | uint64(hb[5])<<40 | uint64(hb[6])<<48 | uint64(hb[7])<<56
-
-		if value <= difficulty {
-			values[string(labelb)] = value
-		}
-
-		if label == 255 {
-			break
-		}
-	}
-	if len(values) == 0 {
-		return 0
-	}
-
-	for batch := range data {
-		index := batch.index
-		labels := batch.data
-		for {
-			if len(labels) == 0 {
-				break
-			}
-			tried += 1
-			label := labels[:labelSize]
-			labels = labels[labelSize:]
-
-			if val, ok := values[string(label)]; ok && val <= difficulty {
-				reporter.Report(ctx, index)
-			}
-			index++
-		}
-		batch.release()
-	}
-	return tried
-}
-
-func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge Challenge, nonce uint32, data chan batch, workers int) (*nonceResult, error) {
+func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge Challenge, nonce uint32, data <-chan *batch, workers int) (*nonceResult, error) {
 	p.logger.Info("Trying nonce %d", nonce)
 	difficulty := shared.ProvingDifficulty(numLabels, uint64(p.cfg.K1))
 
@@ -421,52 +302,55 @@ func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge
 
 	indexConsumer := &IndexConsumer{
 		Indexes: make(chan uint64, workers*10),
+		needed:  p.cfg.K2,
 	}
 
-	var tried atomic.Uint64
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	for workerId := 0; workerId < workers; workerId++ {
 		eg.Go(func() error {
-			t := work(ctx, data, indexConsumer, p.cfg.BitsPerLabel/8, challenge, nonce, difficulty)
-			tried.Add(t)
+			workAESCTR(ctx, data, indexConsumer, p.cfg.BitsPerLabel/8, challenge, nonce, difficulty)
 			return nil
 		})
 	}
 
-	done := make(chan struct{})
 	go func() {
 		eg.Wait()
-		close(done)
+		close(indexConsumer.Indexes)
 	}()
 
 	var passed []uint64
 
 	for {
-		select {
-		case <-done:
-			return nil, fmt.Errorf("exhausted all labels; tried: %v, passed: %v, needed: %v", tried.Load(), len(passed), p.cfg.K2)
-		case index := <-indexConsumer.Indexes:
-			passed = append(passed, index)
-			if len(passed) >= int(p.cfg.K2) {
-				p.logger.Info("Found enough label indexes; tried: %v, passed: %v, needed: %v", tried.Load(), len(passed), p.cfg.K2)
-				sort.Slice(passed, func(i, j int) bool {
-					return i < j
-				})
+		index, more := <-indexConsumer.Indexes
+		if !more {
+			return nil, fmt.Errorf("exhausted all labels; passed: %v, needed: %v", len(passed), p.cfg.K2)
+		}
+		passed = append(passed, index)
+		if len(passed) >= int(p.cfg.K2) {
+			cancel()
+			eg.Wait()
+			p.logger.Info("Found enough label indexes")
+			sort.Slice(passed, func(i, j int) bool {
+				return i < j
+			})
 
-				bitsPerIndex := uint(shared.BinaryRepresentationMinBits(numLabels))
-				buf := bytes.NewBuffer(make([]byte, shared.Size(bitsPerIndex, uint(p.cfg.K2)))[0:0])
-				gsWriter := shared.NewGranSpecificWriter(buf, bitsPerIndex)
-				for _, p := range passed {
-					if err := gsWriter.WriteUintBE(p); err != nil {
-						return nil, err
-					}
-				}
-
-				if err := gsWriter.Flush(); err != nil {
+			bitsPerIndex := uint(shared.BinaryRepresentationMinBits(numLabels))
+			buf := bytes.NewBuffer(make([]byte, shared.Size(bitsPerIndex, uint(p.cfg.K2)))[0:0])
+			gsWriter := shared.NewGranSpecificWriter(buf, bitsPerIndex)
+			for _, p := range passed {
+				if err := gsWriter.WriteUintBE(p); err != nil {
 					return nil, err
 				}
-				return &nonceResult{nonce, buf.Bytes(), nil}, nil
 			}
+
+			if err := gsWriter.Flush(); err != nil {
+				return nil, err
+			}
+			return &nonceResult{nonce, buf.Bytes(), nil}, nil
 		}
+
 	}
 }
 

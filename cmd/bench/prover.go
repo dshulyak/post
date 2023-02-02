@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	input      = "./test-data/8MB"
+	input      = "./test-data/1GB"
 	cpuProfile = "cpu.prof"
 	memProfile = "mem.prof"
 )
@@ -37,13 +38,23 @@ func main() {
 	}
 
 	// numUnits := uint32(5242880)
-	numUnits := uint32(2000)
+	// numUnits := uint32(2000)
+	numUnits := uint32(100)
 
-	nodeId := make([]byte, 32)
-	commitmentAtxId := make([]byte, 32)
+	nodeId, err := base64.StdEncoding.DecodeString("+9xwPdqmzMHZYwPgHDE1xGklyDMfki7Rx1FSpiixs3k=")
+	if err != nil {
+		log.Panic("could not decode base64 node ID: ", err)
+	}
+	commitmentAtxId, err := base64.StdEncoding.DecodeString("bk9LO7RTGZGmic5F8DlfxcoFWFoAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		log.Panic("could not decode base64 commitmentAtxId: ", err)
+	}
+
 	ch := make(proving.Challenge, 32)
 	cfg := config.DefaultConfig()
-	cfg.LabelsPerUnit = 1 << 12
+	cfg.BitsPerLabel = 8
+	// cfg.LabelsPerUnit = 1 << 12
+	cfg.LabelsPerUnit = 10485760
 	cfg.MaxNumUnits = 5242880
 
 	opts := config.DefaultInitOpts()
@@ -51,6 +62,7 @@ func main() {
 	opts.NumUnits = numUnits
 	opts.DataDir = input
 	// opts.MaxFileSize = 21474836480
+	opts.MaxFileSize = 2147483648
 
 	init, err := initialization.NewInitializer(
 		initialization.WithNodeId(nodeId),

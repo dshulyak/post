@@ -3,6 +3,9 @@ package proving
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -274,48 +277,95 @@ func TestCalcProvingDifficulty(t *testing.T) {
 
 type noopReporter struct{}
 
-func (r *noopReporter) Report(context.Context, uint64) {}
+func (r *noopReporter) Report(context.Context, uint64) bool { return false }
 
-func benchmarkHashing(b *testing.B, size int, labelSizeBits int) {
+type worker func(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64)
+
+func benchmarkHashing(b *testing.B, size int, labelSizeBits int, workers int, work worker) {
 	labelSize := labelSizeBits / 8
-
 	challenge := make([]byte, 32, 32)
 	difficulty := shared.ProvingDifficulty(uint64(size/labelSize), uint64(2000))
 
 	var buf = make([]byte, size)
+	_, err := rand.Read(buf)
+	require.NoError(b, err)
+
 	b.SetBytes(int64(size))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		reader := bytes.NewBuffer(buf)
-		workerQeues := []chan batch{make(chan batch, 1)}
+		queue := make(chan *batch, workers)
 
 		var producer errgroup.Group
 		producer.Go(func() error {
-			return produce(context.Background(), reader, workerQeues)
+			return produce(context.Background(), reader, []chan *batch{queue})
 		})
-		work(context.Background(), workerQeues[0], &noopReporter{}, uint8(labelSize), challenge, 0, difficulty)
+		var eg errgroup.Group
+		for workerId := 0; workerId < workers; workerId++ {
+			eg.Go(func() error {
+				work(context.Background(), queue, &noopReporter{}, uint8(labelSize), challenge, 0, difficulty)
+				return nil
+			})
+		}
 		producer.Wait()
+		eg.Wait()
 	}
 }
 
 func BenchmarkHashingLabels(b *testing.B) {
+
 	tests := []struct {
 		name      string
-		f         func(*testing.B, int, int)
+		f         func(*testing.B, int, int, int, worker)
+		work      worker
 		size      int
 		labelSize int
+		workers   int
 	}{
-		{"label:8b", benchmarkHashing, 16 * 1024 * 1024, 8},
-		{"label:16b", benchmarkHashing, 16 * 1024 * 1024, 16},
-		{"label:32b", benchmarkHashing, 16 * 1024 * 1024, 32},
-		{"label:64b", benchmarkHashing, 16 * 1024 * 1024, 64},
-		{"label:128b", benchmarkHashing, 16 * 1024 * 1024, 128},
-		{"label:256b", benchmarkHashing, 16 * 1024 * 1024, 256},
-		{"label:512b", benchmarkHashing, 16 * 1024 * 1024, 512},
-		{"label:1024b", benchmarkHashing, 16 * 1024 * 1024, 1024},
+		{"SHA256", benchmarkHashing, workSha256, 128 * 1024 * 1024, 8, 1},
+		{"SHA256", benchmarkHashing, workSha256, 128 * 1024 * 1024, 16, 1},
+
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 1},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 16, 1},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 2},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 4},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 6},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 14},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 20},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 32, 1},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 64, 1},
+		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 128, 1},
 	}
 
 	for _, test := range tests {
-		b.Run(test.name, func(b *testing.B) { test.f(b, test.size, test.labelSize) })
+		b.Run(
+			fmt.Sprintf("%s|data-size:%.2fMB|label:%db|workers:%d", test.name, float64(test.size)/1024/1024, test.labelSize, test.workers),
+			func(b *testing.B) { test.f(b, test.size, test.labelSize, test.workers, test.work) })
 	}
+}
+
+func TestAesCtrUsedCorrectly(t *testing.T) {
+	ch := []byte("hello world, challenge me!!!!!!!")
+	nonce := uint32(7)
+	key := append([]byte{}, ch...)
+	binary.LittleEndian.AppendUint32(key, nonce)
+	c, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var iv [aes.BlockSize]byte
+	var out [aes.BlockSize]byte
+	var in [aes.BlockSize]byte
+
+	binary.BigEndian.PutUint64(iv[8:], uint64(0))
+	ctr := cipher.NewCTR(c, iv[:])
+	ctr.XORKeyStream(out[:], in[:])
+	ctr.XORKeyStream(out[:], in[:])
+
+	var out2 [aes.BlockSize]byte
+	binary.BigEndian.PutUint64(iv[8:], uint64(1))
+	ctr = cipher.NewCTR(c, iv[:])
+	ctr.XORKeyStream(out2[:], in[:])
+
+	require.Equal(t, out, out2)
 }
