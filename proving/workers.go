@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 
 	"github.com/spacemeshos/sha256-simd"
+	"github.com/spaolacci/murmur3"
+	twmb "github.com/twmb/murmur3"
 )
 
 type batch struct {
@@ -132,6 +134,7 @@ func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 	// Pre-initialize SHA256 digest
 	digest := sha256.New().(*sha256.Digest)
 	digest.Write(ch)
+	indexB := make([]byte, 8)
 	nb := make([]byte, 4)
 	binary.LittleEndian.PutUint32(nb, nonce)
 	digest.Write(nb)
@@ -146,12 +149,72 @@ func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 
 			// Make a copy of digest
 			s := *digest
-			// TODO: should also write the index.
+
+			binary.LittleEndian.PutUint64(indexB, index)
+			s.Write(indexB)
 			s.Write(label)
 			s.CheckSumInto(&hb)
 			// s.Sum(hb[:0])
 
 			if UInt64LE(hb[:]) <= difficulty {
+				if stop := reporter.Report(ctx, index); stop {
+					batch.Release()
+					return
+				}
+			}
+			index++
+		}
+		batch.Release()
+	}
+}
+
+// workTwmbMurmur3 finds labels meeting difficulty using github.com/twmb/murmur3.
+func workTwmbMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+	buffer := make([]byte, 32+4+8+labelSize/8)
+	copy(buffer, ch)
+	binary.LittleEndian.PutUint32(buffer[32:], nonce)
+
+	for batch := range data {
+		index := batch.Index
+		labels := batch.Data
+		for len(labels) > 0 {
+			label := labels[:labelSize]
+			labels = labels[labelSize:]
+
+			binary.LittleEndian.PutUint64(buffer[36:], index)
+			copy(buffer[36+8:], label)
+			value := twmb.Sum64(buffer)
+
+			if value <= difficulty {
+				if stop := reporter.Report(ctx, index); stop {
+					batch.Release()
+					return
+				}
+			}
+			index++
+		}
+		batch.Release()
+	}
+}
+
+// workMurmur3 finds labels meeting difficulty using Murmur3.
+func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+	buffer := make([]byte, 32+4+8+labelSize/8)
+	copy(buffer, ch)
+	binary.LittleEndian.PutUint32(buffer[32:], nonce)
+
+	for batch := range data {
+		index := batch.Index
+		labels := batch.Data
+		for len(labels) > 0 {
+			label := labels[:labelSize]
+			labels = labels[labelSize:]
+
+			binary.LittleEndian.PutUint64(buffer[36:], index)
+			copy(buffer[36+8:], label)
+			value := murmur3.Sum64(buffer)
+
+			if value <= difficulty {
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()
 					return

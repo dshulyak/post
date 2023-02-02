@@ -316,31 +316,32 @@ func BenchmarkHashingLabels(b *testing.B) {
 
 	tests := []struct {
 		name      string
-		f         func(*testing.B, int, int, int, worker)
 		work      worker
 		size      int
 		labelSize int
 		workers   int
 	}{
-		{"SHA256", benchmarkHashing, workSha256, 128 * 1024 * 1024, 8, 1},
-		{"SHA256", benchmarkHashing, workSha256, 128 * 1024 * 1024, 16, 1},
+		{"SHA256", workSha256, 128 * 1024 * 1024, 8, 1},
+		// {"SHA256", workSha256, 128 * 1024 * 1024, 16, 1},
 
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 1},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 16, 1},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 2},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 4},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 6},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 14},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 8, 20},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 32, 1},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 64, 1},
-		{"AES CTR", benchmarkHashing, workAESCTR, 128 * 1024 * 1024, 128, 1},
+		{"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 1},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 16, 1},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 2},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 4},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 6},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 14},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 20},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 32, 1},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 64, 1},
+		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 128, 1},
+		{"Spaolacci Murmur3", workMurmur3, 128 * 1024 * 1024, 8, 1},
+		{"Twmb Murmur3", workTwmbMurmur3, 128 * 1024 * 1024, 8, 1},
 	}
 
 	for _, test := range tests {
 		b.Run(
 			fmt.Sprintf("%s|data-size:%.2fMB|label:%db|workers:%d", test.name, float64(test.size)/1024/1024, test.labelSize, test.workers),
-			func(b *testing.B) { test.f(b, test.size, test.labelSize, test.workers, test.work) })
+			func(b *testing.B) { benchmarkHashing(b, test.size, test.labelSize, test.workers, test.work) })
 	}
 }
 
