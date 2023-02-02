@@ -170,7 +170,7 @@ func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 
 // workTwmbMurmur3 finds labels meeting difficulty using github.com/twmb/murmur3.
 func workTwmbMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
-	buffer := make([]byte, 32+4+8+labelSize/8)
+	buffer := make([]byte, 32+4+8+labelSize)
 	copy(buffer, ch)
 	binary.LittleEndian.PutUint32(buffer[32:], nonce)
 
@@ -199,7 +199,7 @@ func workTwmbMurmur3(ctx context.Context, data <-chan *batch, reporter IndexRepo
 
 // workMurmur3 finds labels meeting difficulty using Murmur3.
 func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
-	buffer := make([]byte, 32+4+8+labelSize/8)
+	buffer := make([]byte, 32+4+8+labelSize)
 	copy(buffer, ch)
 	binary.LittleEndian.PutUint32(buffer[32:], nonce)
 
