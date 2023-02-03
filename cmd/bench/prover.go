@@ -102,7 +102,6 @@ func main() {
 			log.Panic("could not write memory profile: ", err)
 		}
 	}
-
 }
 
 type logger struct{}

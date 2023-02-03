@@ -280,14 +280,18 @@ type noopReporter struct{}
 
 func (r *noopReporter) Report(context.Context, uint64) bool { return false }
 
-type worker func(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64)
+type worker func(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte)
 
 func benchmarkHashing(b *testing.B, size int, labelSizeBits int, workers int, work worker) {
 	labelSize := labelSizeBits / 8
 	challenge := []byte("hello world, challenge me!!!!!!!")
-	difficulty := shared.ProvingDifficulty(uint64(size/labelSize), uint64(2000))
+	difficulty := make([]byte, 8)
+	binary.BigEndian.PutUint64(
+		difficulty,
+		shared.ProvingDifficulty(uint64(size/labelSize), uint64(2000)),
+	)
 
-	var buf = make([]byte, size)
+	buf := make([]byte, size)
 	_, err := rand.Read(buf)
 	require.NoError(b, err)
 

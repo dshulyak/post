@@ -51,7 +51,7 @@ func (c *IndexConsumer) Report(ctx context.Context, index uint64) bool {
 
 // produce reads from `reader` and distributes batches of data into `workerQueues`.
 func produce(ctx context.Context, reader io.Reader, workerQeues []chan *batch) error {
-	var bufferPool = sync.Pool{
+	bufferPool := sync.Pool{
 		New: func() any {
 			return make([]byte, 1024*1024)
 		},
