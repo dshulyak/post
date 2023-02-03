@@ -332,8 +332,6 @@ func BenchmarkHashingLabels(b *testing.B) {
 		{"AES CTR", workAESCTR, 128 * MB, 16, 1},
 		{"AES CTR", workAESCTR, 128 * MB, 32, 1},
 
-		{"AES ECB", workAESECB, 1024 * MB, 8, 1},
-
 		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 8, 1},
 		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 16, 1},
 		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 32, 1},
