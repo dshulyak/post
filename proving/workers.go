@@ -145,6 +145,7 @@ func workAESECB(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 	for batch := range data {
 		index := batch.Index
 		labels := batch.Data
+		labelsCount := len(labels) / int(labelSize)
 		buffer = buffer[:0]
 		for len(labels) > 0 {
 			label := labels[:labelSize]
@@ -159,6 +160,17 @@ func workAESECB(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 		}
 		batch.Release()
 		c.Encrypt(buffer, buffer)
+
+		// analyze
+		for i := 0; i < labelsCount; i++ {
+			block := buffer[:aes.BlockSize]
+			if UInt64LE(block) <= difficulty {
+				if stop := reporter.Report(ctx, index); stop {
+					return
+				}
+			}
+			buffer = buffer[aes.BlockSize:]
+		}
 	}
 }
 
