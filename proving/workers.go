@@ -170,38 +170,26 @@ func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 
 // workTwmbMurmur3 finds labels meeting difficulty using github.com/twmb/murmur3.
 func workTwmbMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
-	buffer := make([]byte, 32+4+8+labelSize)
-	copy(buffer, ch)
-	binary.LittleEndian.PutUint32(buffer[32:], nonce)
-
-	for batch := range data {
-		index := batch.Index
-		labels := batch.Data
-		for len(labels) > 0 {
-			label := labels[:labelSize]
-			labels = labels[labelSize:]
-
-			binary.LittleEndian.PutUint64(buffer[36:], index)
-			copy(buffer[36+8:], label)
-			value := twmb.Sum64(buffer)
-
-			if value <= difficulty {
-				if stop := reporter.Report(ctx, index); stop {
-					batch.Release()
-					return
-				}
-			}
-			index++
-		}
-		batch.Release()
-	}
+	workMurmur3(ctx, data, reporter, labelSize, ch, nonce, difficulty, twmb.Sum64)
 }
 
 // workMurmur3 finds labels meeting difficulty using Murmur3.
-func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
-	buffer := make([]byte, 32+4+8+labelSize)
-	copy(buffer, ch)
-	binary.LittleEndian.PutUint32(buffer[32:], nonce)
+func workSpaolacciMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+	workMurmur3(ctx, data, reporter, labelSize, ch, nonce, difficulty, murmur3.Sum64)
+}
+
+type S64 = func(data []byte) uint64
+
+func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64, sum S64) {
+	chLen := 32
+	nonceLen := 4
+	idLen := 8
+	size := chLen + nonceLen + idLen + int(labelSize)
+	buffer := make([]byte, size)
+	copy(buffer, ch[:chLen])
+	binary.LittleEndian.PutUint32(buffer[chLen+8:], nonce)
+	// binary.LittleEndian.PutUint16(buffer[chLen+idLen:], uint16(nonce))
+	// buffer[chLen+idLen] = byte(nonce)
 
 	for batch := range data {
 		index := batch.Index
@@ -210,10 +198,13 @@ func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter
 			label := labels[:labelSize]
 			labels = labels[labelSize:]
 
-			binary.LittleEndian.PutUint64(buffer[36:], index)
-			copy(buffer[36+8:], label)
-			value := murmur3.Sum64(buffer)
+			binary.LittleEndian.PutUint64(buffer[chLen:], index)
+			// NOTE: copy makes the bench 10% slower than using `buffer[chLen+nonceLen+8] = label[0]`.
+			// TODO: Figure out why?
+			copy(buffer[chLen+nonceLen+8:], label)
+			// buffer[chLen+nonceLen+8] = label[0]
 
+			value := sum(buffer)
 			if value <= difficulty {
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()

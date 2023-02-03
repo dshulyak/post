@@ -13,6 +13,7 @@ import (
 
 	"github.com/spacemeshos/sha256-simd"
 	"github.com/stretchr/testify/require"
+	twmb "github.com/twmb/murmur3"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/spacemeshos/post/config"
@@ -283,13 +284,14 @@ type worker func(ctx context.Context, data <-chan *batch, reporter IndexReporter
 
 func benchmarkHashing(b *testing.B, size int, labelSizeBits int, workers int, work worker) {
 	labelSize := labelSizeBits / 8
-	challenge := make([]byte, 32, 32)
+	challenge := []byte("hello world, challenge me!!!!!!!")
 	difficulty := shared.ProvingDifficulty(uint64(size/labelSize), uint64(2000))
 
 	var buf = make([]byte, size)
 	_, err := rand.Read(buf)
 	require.NoError(b, err)
 
+	b.SetParallelism(workers + 1)
 	b.SetBytes(int64(size))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -303,7 +305,7 @@ func benchmarkHashing(b *testing.B, size int, labelSizeBits int, workers int, wo
 		var eg errgroup.Group
 		for workerId := 0; workerId < workers; workerId++ {
 			eg.Go(func() error {
-				work(context.Background(), queue, &noopReporter{}, uint8(labelSize), challenge, 0, difficulty)
+				work(context.Background(), queue, &noopReporter{}, uint8(labelSize), challenge, 17, difficulty)
 				return nil
 			})
 		}
@@ -313,6 +315,7 @@ func benchmarkHashing(b *testing.B, size int, labelSizeBits int, workers int, wo
 }
 
 func BenchmarkHashingLabels(b *testing.B) {
+	const MB = 1024 * 1024
 
 	tests := []struct {
 		name      string
@@ -321,21 +324,17 @@ func BenchmarkHashingLabels(b *testing.B) {
 		labelSize int
 		workers   int
 	}{
-		{"SHA256", workSha256, 128 * 1024 * 1024, 8, 1},
-		// {"SHA256", workSha256, 128 * 1024 * 1024, 16, 1},
+		{"SHA256", workSha256, 128 * MB, 8, 1},
+		{"SHA256", workSha256, 128 * MB, 16, 1},
 
-		{"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 1},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 16, 1},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 2},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 4},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 6},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 14},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 8, 20},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 32, 1},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 64, 1},
-		// {"AES CTR", workAESCTR, 128 * 1024 * 1024, 128, 1},
-		{"Spaolacci Murmur3", workMurmur3, 128 * 1024 * 1024, 8, 1},
-		{"Twmb Murmur3", workTwmbMurmur3, 128 * 1024 * 1024, 8, 1},
+		{"AES CTR", workAESCTR, 128 * MB, 8, 1},
+		{"AES CTR", workAESCTR, 128 * MB, 16, 1},
+
+		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 8, 1},
+		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 16, 1},
+
+		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 8, 1},
+		{"Twmb Murmur3", workTwmbMurmur3, 256 * MB, 16, 1},
 	}
 
 	for _, test := range tests {
@@ -369,4 +368,43 @@ func TestAesCtrUsedCorrectly(t *testing.T) {
 	ctr.XORKeyStream(out2[:], in[:])
 
 	require.Equal(t, out, out2)
+}
+
+func BenchmarkMurmur(b *testing.B) {
+	const MB = 1024 * 1024
+	challenge := []byte("hello world, challenge me!!!!!!!")
+	tests := []struct{ ch []byte }{
+		{challenge[:8]},
+		{challenge[:16]},
+		{challenge[:32]},
+	}
+
+	nonce := uint32(0)
+	label := []byte{0xc3}
+
+	for _, test := range tests {
+		b.Run(fmt.Sprintf("challenge len:%d", len(test.ch)), func(b *testing.B) {
+			size := 256 * MB
+			b.SetBytes(int64(size))
+
+			// NOTE: THe code is much faster if chLen is constant!
+			// chLen := 32
+			chLen := len(test.ch)
+			nonceLen := 4
+			idLen := 8
+			labelLen := 1
+			buffer := make([]byte, chLen+nonceLen+idLen+labelLen)
+
+			copy(buffer, test.ch[:chLen])
+			binary.LittleEndian.PutUint32(buffer[chLen+8:], nonce)
+
+			for i := 0; i < b.N; i++ {
+				for index := uint64(0); index < uint64(size); index++ {
+					binary.LittleEndian.PutUint64(buffer[chLen:], index)
+					copy(buffer[chLen+nonceLen+idLen:], label)
+					twmb.Sum64(buffer)
+				}
+			}
+		})
+	}
 }
