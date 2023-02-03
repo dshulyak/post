@@ -130,6 +130,38 @@ func workAESCTR(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 	}
 }
 
+func workAESECB(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+	key := append([]byte{}, ch...)
+	binary.LittleEndian.AppendUint32(key, nonce)
+	c, err := aes.NewCipher(key)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// prealloc for 1M labels
+	var buffer = make([]byte, 0, 1024*1024*aes.BlockSize)
+	var zeros [32]byte
+
+	for batch := range data {
+		index := batch.Index
+		labels := batch.Data
+		buffer = buffer[:0]
+		for len(labels) > 0 {
+			label := labels[:labelSize]
+
+			buffer = binary.BigEndian.AppendUint64(buffer, index)
+			buffer = append(buffer, label...)
+			// pad with zeros
+			buffer = append(buffer, zeros[:(aes.BlockSize-8-labelSize)]...)
+
+			index++
+			labels = labels[labelSize:]
+		}
+		batch.Release()
+		c.Encrypt(buffer, buffer)
+	}
+}
+
 // workSha256 finds labels meeting difficulty using SHA256 way.
 func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
 	// Pre-initialize SHA256 digest
