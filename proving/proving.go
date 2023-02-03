@@ -3,6 +3,7 @@ package proving
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -296,7 +297,11 @@ func (p *Prover) tryManyNonces(ctx context.Context, numLabels uint64, challenge 
 
 func (p *Prover) trySingleNonce(ctx context.Context, numLabels uint64, challenge Challenge, nonce uint32, data <-chan *batch, workers int) (*nonceResult, error) {
 	p.logger.Info("Trying nonce %d", nonce)
-	difficulty := shared.ProvingDifficulty(numLabels, uint64(p.cfg.K1))
+	difficulty := make([]byte, 8)
+	binary.BigEndian.PutUint64(
+		difficulty,
+		shared.ProvingDifficulty(numLabels, uint64(p.cfg.K1)),
+	)
 
 	var eg errgroup.Group
 

@@ -1,6 +1,7 @@
 package proving
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -95,7 +96,7 @@ func produce(ctx context.Context, reader io.Reader, workerQeues []chan *batch) e
 }
 
 // workAESCTR finds labels meeting difficulty using AES CTR way.
-func workAESCTR(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+func workAESCTR(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte) {
 	key := append([]byte{}, ch...)
 	binary.LittleEndian.AppendUint32(key, nonce)
 	c, err := aes.NewCipher(key)
@@ -118,7 +119,7 @@ func workAESCTR(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 			copy(in, label)
 
 			ctr.XORKeyStream(out, in)
-			if UInt64LE(out) <= difficulty {
+			if bytes.Compare(out, difficulty) <= 0 { // TODO: is it "less or equal" or just "less"?
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()
 					return
@@ -131,7 +132,7 @@ func workAESCTR(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 }
 
 // workSha256 finds labels meeting difficulty using SHA256 way.
-func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte) {
 	// Pre-initialize SHA256 digest
 	digest := sha256.New().(*sha256.Digest)
 	digest.Write(ch)
@@ -157,7 +158,7 @@ func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 			s.CheckSumInto(&hb)
 			// s.Sum(hb[:0])
 
-			if UInt64LE(hb[:]) <= difficulty {
+			if bytes.Compare(hb[:], difficulty) <= 0 {
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()
 					return
@@ -170,21 +171,22 @@ func workSha256(ctx context.Context, data <-chan *batch, reporter IndexReporter,
 }
 
 // workTwmbMurmur3 finds labels meeting difficulty using github.com/twmb/murmur3.
-func workTwmbMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+func workTwmbMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte) {
 	workMurmur3(ctx, data, reporter, labelSize, ch, nonce, difficulty, twmb.Sum64)
 }
 
 // workMurmur3 finds labels meeting difficulty using Murmur3.
-func workSpaolacciMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+func workSpaolacciMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte) {
 	workMurmur3(ctx, data, reporter, labelSize, ch, nonce, difficulty, murmur3.Sum64)
 }
 
 type S64 = func(data []byte) uint64
 
-func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64, sum S64) {
+func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte, sum S64) {
 	chLen := 32
 	nonceLen := 4
 	idLen := 8
+	d := binary.BigEndian.Uint64(difficulty)
 	size := chLen + nonceLen + idLen + int(labelSize)
 	buffer := make([]byte, size)
 	copy(buffer, ch[:chLen])
@@ -206,7 +208,7 @@ func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter
 			// buffer[chLen+nonceLen+8] = label[0]
 
 			value := sum(buffer)
-			if value <= difficulty {
+			if value <= d {
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()
 					return
@@ -218,9 +220,11 @@ func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter
 	}
 }
 
-func workSiphash(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+func workSiphash(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty []byte) {
 	nb := make([]byte, 4)
 	binary.LittleEndian.PutUint32(nb, nonce)
+
+	d := binary.BigEndian.Uint64(difficulty)
 
 	h := siphash.New(ch)
 	h.Write(nb)
@@ -234,7 +238,7 @@ func workSiphash(ctx context.Context, data <-chan *batch, reporter IndexReporter
 			labels = labels[labelSize:]
 
 			value := siphash.Hash(key0, index, label)
-			if value <= difficulty {
+			if value <= d {
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()
 					return
