@@ -326,15 +326,19 @@ func BenchmarkHashingLabels(b *testing.B) {
 	}{
 		{"SHA256", workSha256, 128 * MB, 8, 1},
 		{"SHA256", workSha256, 128 * MB, 16, 1},
+		{"SHA256", workSha256, 128 * MB, 32, 1},
 
 		{"AES CTR", workAESCTR, 128 * MB, 8, 1},
 		{"AES CTR", workAESCTR, 128 * MB, 16, 1},
+		{"AES CTR", workAESCTR, 128 * MB, 32, 1},
 
 		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 8, 1},
 		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 16, 1},
+		{"Spaolacci Murmur3", workSpaolacciMurmur3, 128 * MB, 32, 1},
 
 		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 8, 1},
-		{"Twmb Murmur3", workTwmbMurmur3, 256 * MB, 16, 1},
+		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 16, 1},
+		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 32, 1},
 	}
 
 	for _, test := range tests {
