@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/dchest/siphash"
 	"github.com/spacemeshos/sha256-simd"
 	"github.com/spaolacci/murmur3"
 	twmb "github.com/twmb/murmur3"
@@ -205,6 +206,34 @@ func workMurmur3(ctx context.Context, data <-chan *batch, reporter IndexReporter
 			// buffer[chLen+nonceLen+8] = label[0]
 
 			value := sum(buffer)
+			if value <= difficulty {
+				if stop := reporter.Report(ctx, index); stop {
+					batch.Release()
+					return
+				}
+			}
+			index++
+		}
+		batch.Release()
+	}
+}
+
+func workSiphash(ctx context.Context, data <-chan *batch, reporter IndexReporter, labelSize uint8, ch Challenge, nonce uint32, difficulty uint64) {
+	nb := make([]byte, 4)
+	binary.LittleEndian.PutUint32(nb, nonce)
+
+	h := siphash.New(ch)
+	h.Write(nb)
+	key0 := h.Sum64()
+
+	for batch := range data {
+		index := batch.Index
+		labels := batch.Data
+		for len(labels) > 0 {
+			label := labels[:labelSize]
+			labels = labels[labelSize:]
+
+			value := siphash.Hash(key0, index, label)
 			if value <= difficulty {
 				if stop := reporter.Report(ctx, index); stop {
 					batch.Release()

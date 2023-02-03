@@ -339,6 +339,10 @@ func BenchmarkHashingLabels(b *testing.B) {
 		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 8, 1},
 		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 16, 1},
 		{"Twmb Murmur3", workTwmbMurmur3, 512 * MB, 32, 1},
+
+		{"SipHash", workSiphash, 512 * MB, 8, 1},
+		{"SipHash", workSiphash, 512 * MB, 16, 1},
+		{"SipHash", workSiphash, 512 * MB, 32, 1},
 	}
 
 	for _, test := range tests {
