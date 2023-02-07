@@ -53,7 +53,7 @@ func (c *IndexConsumer) Report(ctx context.Context, index uint64) bool {
 func produce(ctx context.Context, reader io.Reader, workerQeues []chan *batch) error {
 	bufferPool := sync.Pool{
 		New: func() any {
-			return make([]byte, 1024*1024)
+			return make([]byte, 1024*1024*16)
 		},
 	}
 	defer func() {

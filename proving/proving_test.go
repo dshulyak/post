@@ -1,14 +1,14 @@
 package proving
 
 import (
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
+	"math/rand"
 	"testing"
 
 	"github.com/spacemeshos/sha256-simd"
@@ -291,16 +291,12 @@ func benchmarkHashing(b *testing.B, size int, labelSizeBits int, workers int, wo
 		shared.ProvingDifficulty(uint64(size/labelSize), uint64(2000)),
 	)
 
-	buf := make([]byte, size)
-	_, err := rand.Read(buf)
-	require.NoError(b, err)
-
 	b.SetParallelism(workers + 1)
 	b.SetBytes(int64(size))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reader := bytes.NewBuffer(buf)
 		queue := make(chan *batch, workers)
+		reader := io.LimitReader(rand.New(rand.NewSource(0)), int64(size))
 
 		var producer errgroup.Group
 		producer.Go(func() error {
@@ -353,6 +349,61 @@ func BenchmarkHashingLabels(b *testing.B) {
 		b.Run(
 			fmt.Sprintf("%s|data-size:%.2fMB|label:%db|workers:%d", test.name, float64(test.size)/1024/1024, test.labelSize, test.workers),
 			func(b *testing.B) { benchmarkHashing(b, test.size, test.labelSize, test.workers, test.work) })
+	}
+}
+
+type noopNewReporter struct{}
+
+func (r *noopNewReporter) Report(context.Context, uint32, uint64) bool { return false }
+
+type newProver func(ctx context.Context, data <-chan *batch, reporter IndexReporterNew, ch Challenge, difficulty []byte)
+
+func benchmarkNewProving(b *testing.B, size int, prover newProver) {
+	challenge := []byte("hello world, challenge me!!!!!!!")
+	difficulty := make([]byte, 8)
+	binary.BigEndian.PutUint64(
+		difficulty,
+		shared.ProvingDifficulty(uint64(size), uint64(2000)),
+	)
+
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		queue := make(chan *batch, 1)
+		reader := io.LimitReader(rand.New(rand.NewSource(0)), int64(size))
+
+		var producer errgroup.Group
+		producer.Go(func() error {
+			return produce(context.Background(), reader, []chan *batch{queue})
+		})
+		var eg errgroup.Group
+		for workerId := 0; workerId < 1; workerId++ {
+			eg.Go(func() error {
+				prover(context.Background(), queue, &noopNewReporter{}, challenge, difficulty)
+				return nil
+			})
+		}
+		producer.Wait()
+		eg.Wait()
+	}
+}
+
+func BenchmarkNewProving(b *testing.B) {
+	const MiB = 1024 * 1024
+	const GiB = MiB * 1024
+
+	tests := []struct {
+		name   string
+		prover newProver
+		size   int
+	}{
+		{"Blake3", workNewBlake, 256 * MiB},
+	}
+
+	for _, test := range tests {
+		b.Run(
+			fmt.Sprintf("%s_data-size:%.2fMiB", test.name, float64(test.size)/1024/1024),
+			func(b *testing.B) { benchmarkNewProving(b, test.size, test.prover) })
 	}
 }
 
