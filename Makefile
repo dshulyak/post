@@ -86,3 +86,8 @@ postcli: get-gpu-setup get-postrs-lib
 bench:
 	@$(ULIMIT) CGO_LDFLAGS="$(CGO_TEST_LDFLAGS)" go test -benchmem -run='^$$' -bench 'BenchmarkVerifying|BenchmarkProving' github.com/spacemeshos/post/proving github.com/spacemeshos/post/verifying
 .PHONY: bench
+
+
+.PHONY: please
+please:
+	@$(ULIMIT) CGO_LDFLAGS="$(CGO_TEST_LDFLAGS)" go test ./oracle -run=TestComputeLabel -v
